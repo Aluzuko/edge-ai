@@ -1,7 +1,11 @@
+import json
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -10,6 +14,62 @@ from pyodbc import IntegrityError
 from config import IMAGES_DIR
 from database import DictConnection, get_db
 from schemas import DeviceRegister, RequestCreate
+from pydantic import BaseModel
+
+
+class RangerCreate(BaseModel):
+    name: str
+    contact: str | None = None
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from cnn import CNN
+from preprocessing import ImagePreprocessor
+
+MODEL_PATH = "models/best.npz"
+MODEL_META_PATH = "models/latest_meta.json"
+
+with open(MODEL_META_PATH) as _f:
+    _meta = json.load(_f)
+MODEL_CLASSES = _meta["classes"]
+
+MODEL_VERSION = f"cnn_v1_fp32_epoch{_meta['epoch']}"
+MODEL_ACCURACY = _meta.get("best_val_acc", _meta.get("val_acc"))
+
+_cnn = CNN(num_classes=len(MODEL_CLASSES))
+_cnn.load(MODEL_PATH)
+_preprocessor = ImagePreprocessor(target_size=(64, 64))
+
+_model_run_id_cache: int | None = None
+
+
+def _get_or_create_model_run(db: DictConnection) -> int:
+    row = db.execute(
+        "SELECT model_run_id FROM model_runs WHERE model_version = ?",
+        (MODEL_VERSION,),
+    ).fetchone()
+    if row is not None:
+        return row["model_run_id"]
+
+    dummy = np.zeros((64, 64, 3))
+    n_runs = 20
+    start = time.perf_counter()
+    for _ in range(n_runs):
+        _cnn.forward(dummy)
+    avg_latency_ms = (time.perf_counter() - start) / n_runs * 1000
+
+    size_kb = Path(MODEL_PATH).stat().st_size / 1024
+
+    row = db.execute(
+        """
+        INSERT INTO model_runs (model_version, quantized, size_kb, avg_latency_ms, accuracy)
+        OUTPUT INSERTED.model_run_id
+        VALUES (?, 0, ?, ?, ?)
+        """,
+        (MODEL_VERSION, size_kb, avg_latency_ms, MODEL_ACCURACY),
+    ).fetchone()
+    db.commit()
+    return row["model_run_id"]
 
 app = FastAPI(title="Wildlife Detection & Request API")
 
@@ -36,21 +96,43 @@ def list_cameras(db: DictConnection = Depends(get_db)):
     rows = db.execute("SELECT * FROM cameras ORDER BY name").fetchall()
     return [dict(r) for r in rows]
 
+
+@app.get("/rangers")
+def list_rangers(db: DictConnection = Depends(get_db)):
+    rows = db.execute("SELECT * FROM rangers ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/rangers", status_code=201)
+def create_ranger(payload: RangerCreate, db: DictConnection = Depends(get_db)):
+    row = db.execute(
+        """
+        INSERT INTO rangers (name, contact)
+        OUTPUT INSERTED.*
+        VALUES (?, ?)
+        """,
+        (payload.name, payload.contact),
+    ).fetchone()
+    db.commit()
+    return dict(row)
+
 @app.post("/requests", status_code=201)
 def create_request(payload: RequestCreate, db: DictConnection = Depends(get_db)):
     try:
         cur = db.execute(
             """
             INSERT INTO requests (ranger_id, species_id, camera_id, status)
+            OUTPUT INSERTED.request_id
             VALUES (?, ?, ?, 'pending')
             """,
             (payload.ranger_id, payload.species_id, payload.camera_id),
         )
+        new_id = cur.fetchone()["request_id"]
         db.commit()
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=f"Invalid reference: {e}")
 
-    return get_request_by_id(cur.lastrowid, db)
+    return get_request_by_id(new_id, db)
 
 
 @app.get("/requests")
@@ -96,6 +178,33 @@ def get_request_by_id(request_id: int, db: DictConnection = Depends(get_db)):
     if row is None:
         raise HTTPException(status_code=404, detail="Request not found")
 
+    return dict(row)
+
+
+@app.patch("/requests/{request_id}/seen")
+def mark_request_seen(request_id: int, db: DictConnection = Depends(get_db)):
+    row = db.execute(
+        """
+        UPDATE requests
+        SET status = 'seen'
+        OUTPUT INSERTED.*
+        WHERE request_id = ? AND status = 'pending'
+        """,
+        (request_id,),
+    ).fetchone()
+
+    if row is None:
+        existing = db.execute(
+            "SELECT status FROM requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request is not 'pending' (current status: '{existing['status']}')",
+        )
+
+    db.commit()
     return dict(row)
 
 @app.get("/detections")
@@ -144,15 +253,16 @@ def upload_image(
     dest_path.write_bytes(file.file.read())
 
     relative_path = f"{camera_id}/{filename}"
-    cur = db.execute(
-        "INSERT INTO images (camera_id, file_path, captured_at) VALUES (?, ?, GETDATE())",
+    row = db.execute(
+        """
+        INSERT INTO images (camera_id, file_path, captured_at)
+        OUTPUT INSERTED.*
+        VALUES (?, ?, GETDATE())
+        """,
         (camera_id, relative_path),
-    )
+    ).fetchone()
     db.commit()
 
-    row = db.execute(
-        "SELECT * FROM images WHERE image_id = ?", (cur.lastrowid,)
-    ).fetchone()
     return dict(row)
 
 
@@ -179,7 +289,7 @@ def list_images(
 
 @app.get("/images/{image_id}/file")
 def get_image_file(image_id: int, db: DictConnection = Depends(get_db)):
-   
+
     row = db.execute(
         "SELECT file_path FROM images WHERE image_id = ?", (image_id,)
     ).fetchone()
@@ -191,6 +301,81 @@ def get_image_file(image_id: int, db: DictConnection = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Image file missing on disk")
 
     return FileResponse(full_path)
+
+
+@app.post("/images/{image_id}/detect", status_code=201)
+def detect_image(image_id: int, db: DictConnection = Depends(get_db)):
+    row = db.execute(
+        "SELECT file_path FROM images WHERE image_id = ?", (image_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Image record not found")
+
+    full_path = IMAGES_DIR / row["file_path"]
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="Image file missing on disk")
+
+    image_array = _preprocessor.load_image(str(full_path))
+    processed = _preprocessor.normalise(image_array)
+
+    inference_start = time.perf_counter()
+    probs, _ = _cnn.forward(processed)
+    inference_time_ms = (time.perf_counter() - inference_start) * 1000
+
+    pred_idx = int(np.argmax(probs))
+    predicted_class = MODEL_CLASSES[pred_idx]
+    confidence = float(probs[pred_idx])
+
+    species_row = db.execute(
+        "SELECT species_id FROM species WHERE name = ?", (predicted_class,)
+    ).fetchone()
+    if species_row is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model predicted class '{predicted_class}' which has no matching species row",
+        )
+
+    global _model_run_id_cache
+    if _model_run_id_cache is None:
+        _model_run_id_cache = _get_or_create_model_run(db)
+    model_run_id = _model_run_id_cache
+
+    cur = db.execute(
+        """
+        INSERT INTO detections (image_id, species_id, model_run_id, confidence, inference_time_ms, created_at)
+        OUTPUT INSERTED.detection_id
+        VALUES (?, ?, ?, ?, ?, GETDATE())
+        """,
+        (image_id, species_row["species_id"], model_run_id, confidence, inference_time_ms),
+    )
+    new_id = cur.fetchone()["detection_id"]
+    db.commit()
+    db.execute(
+        """
+        UPDATE requests
+        SET fulfilled_detection_id = ?, fulfilled_at = GETDATE()
+        WHERE species_id = ?
+          AND status = 'pending'
+          AND fulfilled_detection_id IS NULL
+          AND (camera_id IS NULL OR camera_id = (
+              SELECT camera_id FROM images WHERE image_id = ?
+          ))
+        """,
+        (new_id, species_row["species_id"], image_id),
+    )
+    db.commit()
+
+    detection_row = db.execute(
+        """
+        SELECT det.*, s.name AS species_name
+        FROM detections det
+        JOIN species s ON s.species_id = det.species_id
+        WHERE det.detection_id = ?
+        """,
+        (new_id,),
+    ).fetchone()
+    return dict(detection_row)
+
 
 @app.get("/model-runs")
 def list_model_runs(db: DictConnection = Depends(get_db)):
