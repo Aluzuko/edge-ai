@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from cnn import CNN
 from preprocessing import ImagePreprocessor
 
-MODEL_PATH = "models/best.npz"
+MODEL_PATH = "models/best2.npz"
 MODEL_META_PATH = "models/latest_meta.json"
 
 with open(MODEL_META_PATH) as _f:

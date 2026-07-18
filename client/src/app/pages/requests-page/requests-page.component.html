@@ -1,0 +1,57 @@
+<div class="container-fluid py-3">
+  <h4 class="mb-3"><i class="bi bi-bell me-2"></i>Species requests</h4>
+
+  <div class="card mb-4">
+    <div class="card-body">
+      <h6 class="card-title">New request</h6>
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Ranger</label>
+          <select class="form-select" [(ngModel)]="newRequest.ranger_id">
+            <option [ngValue]="null" disabled>Select ranger</option>
+            <option *ngFor="let r of rangers" [ngValue]="r.ranger_id">{{ r.name }}</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Species</label>
+          <select class="form-select" [(ngModel)]="newRequest.species_id">
+            <option [ngValue]="null" disabled>Select species</option>
+            <option *ngFor="let s of species" [ngValue]="s.species_id">{{ s.common_name }}</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Camera (optional)</label>
+          <select class="form-select" [(ngModel)]="newRequest.camera_id">
+            <option [ngValue]="null">Any camera</option>
+            <option *ngFor="let c of cameras" [ngValue]="c.camera_id">{{ c.name }}</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-primary w-100" [disabled]="creating || !newRequest.ranger_id || !newRequest.species_id" (click)="createRequest()">
+            <i class="bi bi-plus-lg me-1"></i>{{ creating ? 'Creating...' : 'Create request' }}
+          </button>
+        </div>
+      </div>
+      <div *ngIf="errorMessage" class="alert alert-danger mt-3 mb-0">{{ errorMessage }}</div>
+    </div>
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h6 class="mb-0">All requests</h6>
+    <select class="form-select w-auto" [(ngModel)]="statusFilter" (ngModelChange)="loadRequests()">
+      <option value="">All statuses</option>
+      <option value="pending">Pending</option>
+      <option value="seen">Seen</option>
+      <option value="expired">Expired</option>
+    </select>
+  </div>
+
+  <ag-grid-angular
+    class="w-100"
+    style="height: 500px;"
+    [rowData]="requests"
+    [columnDefs]="colDefs"
+    [theme]="theme"
+    [context]="gridContext">
+  </ag-grid-angular>
+</div>

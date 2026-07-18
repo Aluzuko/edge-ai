@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "342796856387",
+    "project_id": "lwaziapp",
+    "storage_bucket": "lwaziapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:342796856387:android:bfd3db9569c5ae6287f8f6",
+        "android_client_info": {
+          "package_name": "com.example.lwaziapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBKpsL0ym-LB8N-q1qHM9Evl_5eh-moSNw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

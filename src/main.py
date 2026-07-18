@@ -1,7 +1,7 @@
 from pipeline import Pipeline
 
 if __name__ == "__main__":
-    DATA_DIR = "data_split"
+    DATA_DIR = "../data_split"
     CHECKPOINT_DIR = "checkpoints"
 
     pipeline = Pipeline(
