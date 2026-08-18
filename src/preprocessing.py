@@ -13,4 +13,4 @@ class ImagePreprocessor:
         return np.array(image)
 
     def normalise(self, image_array: np.ndarray) -> np.ndarray:
-        return image_array / 255.0
+        return (image_array / 255.0).astype(np.float32)

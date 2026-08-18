@@ -22,6 +22,18 @@ class RangerCreate(BaseModel):
     contact: str | None = None
 
 
+class AuthPayload(BaseModel):
+    username: str
+    otp: str
+
+
+class ModelRunCreate(BaseModel):
+    quantized: bool = False
+    size_kb: float
+    avg_latency_ms: float
+    accuracy: float
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from cnn import CNN
 from preprocessing import ImagePreprocessor
@@ -75,7 +87,7 @@ app = FastAPI(title="Wildlife Detection & Request API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -105,13 +117,14 @@ def list_rangers(db: DictConnection = Depends(get_db)):
 
 @app.post("/rangers", status_code=201)
 def create_ranger(payload: RangerCreate, db: DictConnection = Depends(get_db)):
+    otp = str(uuid4().int)[:6]
     row = db.execute(
         """
-        INSERT INTO rangers (name, contact)
+        INSERT INTO rangers (name, contact, otp)
         OUTPUT INSERTED.*
-        VALUES (?, ?)
+        VALUES (?, ?, ?)
         """,
-        (payload.name, payload.contact),
+        (payload.name, payload.contact, otp),
     ).fetchone()
     db.commit()
     return dict(row)
@@ -384,6 +397,40 @@ def list_model_runs(db: DictConnection = Depends(get_db)):
     ).fetchall()
     return [dict(r) for r in rows]
 
+@app.post("/model-runs", status_code=201)
+def create_model_run(payload: ModelRunCreate, db: DictConnection = Depends(get_db)):
+    model_version = f"best_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+    row = db.execute(
+        """
+        INSERT INTO model_runs (model_version, quantized, size_kb, avg_latency_ms, accuracy)
+        OUTPUT INSERTED.*
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (model_version, int(payload.quantized), payload.size_kb, payload.avg_latency_ms, payload.accuracy),
+    ).fetchone()
+    db.commit()
+    return dict(row)
+
+@app.post("/api/authenticate")
+def authenticate(payload: AuthPayload, db: DictConnection = Depends(get_db)):
+    print(payload)
+    username = payload.username
+    otp = payload.otp
+
+    if not username or not otp:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    ranger_row = db.execute(
+        "SELECT * FROM rangers WHERE name = ? AND otp = ?", (username, otp)
+    ).fetchone()
+
+    if ranger_row is None:
+        raise HTTPException(status_code=401, detail="Invalid username or OTP")
+
+    ranger_id = ranger_row["ranger_id"]
+
+    return {"status_code": 200, "authenticated": True, "message": "Authentication successful", "ranger_id": ranger_id}
+
 @app.post("/devices", status_code=201)
 def register_device(payload: DeviceRegister, db: DictConnection = Depends(get_db)):
     try:
@@ -411,3 +458,23 @@ def register_device(payload: DeviceRegister, db: DictConnection = Depends(get_db
         "SELECT * FROM devices WHERE fcm_token = ?", (payload.fcm_token,)
     ).fetchone()
     return dict(row)
+
+@app.post("/device-info")
+def receive_device_info(payload: dict, db: DictConnection = Depends(get_db)):
+    fcm_token = payload.get("fcm_token")
+    platform = payload.get("platform")
+    platform_version = payload.get("platformVersion")
+    username = payload.get("username")
+
+    if not fcm_token:
+        raise HTTPException(status_code=400, detail="Missing fcm_token in payload")
+
+    db.execute(
+        """insert into devices(
+        select ranger_id from rangers where name = ?), ?, ?, ?, GETDATE()
+        """,
+        (username, fcm_token, platform, platform_version)
+    )
+    db.commit()
+
+    return {"status": "ok", "message": "Device info received"}

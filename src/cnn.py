@@ -12,14 +12,19 @@ class CNN:
         self._rng = np.random.default_rng(seed)
 
         fan_in_conv = kernel_size * kernel_size * 3
-        self.filters = (self._rng.standard_normal((num_filters, kernel_size, kernel_size, 3))
-                         * np.sqrt(2.0 / fan_in_conv))
-        self.conv_bias = np.zeros(num_filters)
+        self.filters = (
+            self._rng.standard_normal((num_filters, kernel_size, kernel_size, 3)).astype(np.float32)
+            * np.sqrt(2.0 / fan_in_conv)
+        ).astype(np.float32)
+        self.conv_bias = np.zeros(num_filters, dtype=np.float32)
 
-        self.dense1_w = None  # lazy init: depends on flattened pooled size
-        self.dense1_b = np.zeros(hidden_dim)
-        self.dense2_w = self._rng.standard_normal((hidden_dim, num_classes)) * np.sqrt(2.0 / hidden_dim)
-        self.dense2_b = np.zeros(num_classes)
+        self.dense1_w = None
+        self.dense1_b = np.zeros(hidden_dim, dtype=np.float32)
+        self.dense2_w = (
+            self._rng.standard_normal((hidden_dim, num_classes)).astype(np.float32)
+            * np.sqrt(2.0 / hidden_dim)
+        ).astype(np.float32)
+        self.dense2_b = np.zeros(num_classes, dtype=np.float32)
 
     @staticmethod
     def _relu(x):
@@ -56,11 +61,14 @@ class CNN:
         conv_out, windows = self._conv_forward(image)
         relu_out = self._relu(conv_out)
         pool_out, pool_mask, pre_pool_shape = self._maxpool_forward(relu_out)
-        flat = pool_out.flatten()
+        flat = pool_out.astype(np.float32).flatten()
 
         if self.dense1_w is None:
             fan_in = len(flat)
-            self.dense1_w = self._rng.standard_normal((fan_in, self.hidden_dim)) * np.sqrt(2.0 / fan_in)
+            self.dense1_w = (
+                self._rng.standard_normal((fan_in, self.hidden_dim)).astype(np.float32)
+                * np.sqrt(2.0 / fan_in)
+            ).astype(np.float32)
 
         hidden_z = flat @ self.dense1_w + self.dense1_b
         hidden_a = self._relu(hidden_z)
@@ -76,18 +84,17 @@ class CNN:
         return probs, cache
 
     def gradients(self, cache, actual_idx: int):
-        """Gradients for one example (not applied — caller accumulates over a batch)."""
-        onehot = np.zeros(self.num_classes)
+        onehot = np.zeros(self.num_classes, dtype=np.float32)
         onehot[actual_idx] = 1.0
         d_out_z = cache['probs'] - onehot
 
-        d_dense2_w = np.outer(cache['hidden_a'], d_out_z)
-        d_dense2_b = d_out_z
+        d_dense2_w = np.outer(cache['hidden_a'], d_out_z).astype(np.float32)
+        d_dense2_b = d_out_z.astype(np.float32)
         d_hidden_a = self.dense2_w @ d_out_z
 
         d_hidden_z = d_hidden_a * (cache['hidden_z'] > 0)
-        d_dense1_w = np.outer(cache['flat'], d_hidden_z)
-        d_dense1_b = d_hidden_z
+        d_dense1_w = np.outer(cache['flat'], d_hidden_z).astype(np.float32)
+        d_dense1_b = d_hidden_z.astype(np.float32)
         d_flat = d_hidden_z @ self.dense1_w.T
 
         d_pool_out = d_flat.reshape(cache['pool_out_shape'])
@@ -97,7 +104,7 @@ class CNN:
         mask = cache['pool_mask']
         counts = mask.sum(axis=(1, 3), keepdims=True)
         d_relu_trimmed = (mask * d_pool_out[:, None, :, None, :]) / np.maximum(counts, 1)
-        d_relu = np.zeros((H, W, F))
+        d_relu = np.zeros((H, W, F), dtype=np.float32)
         d_relu[:H2 * 2, :W2 * 2, :] = d_relu_trimmed.reshape(H2 * 2, W2 * 2, F)
 
         d_conv_out = d_relu * (cache['conv_out'] > 0)

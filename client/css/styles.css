@@ -1,0 +1,19 @@
+@import url("https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css");
+@import url("https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css");
+
+body {
+  background: #f8f9fa;
+}
+
+table td, table th {
+  vertical-align: middle;
+}
+
+.clickable-row {
+  cursor: pointer;
+}
+
+.thumb {
+  height: 48px;
+  width: auto;
+}

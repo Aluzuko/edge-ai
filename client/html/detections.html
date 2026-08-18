@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Detections - Wildlife detection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+  <div id="nav"></div>
+
+  <div class="container-fluid py-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h4 class="mb-0"><i class="bi bi-binoculars me-2"></i>Detections</h4>
+      <select id="speciesFilter" class="form-select w-auto">
+        <option value="">All species</option>
+      </select>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Species</th>
+            <th>Confidence</th>
+            <th>Inference (ms)</th>
+            <th>Captured at</th>
+            <th>Detected at</th>
+          </tr>
+        </thead>
+        <tbody id="detectionsBody">
+          <tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <nav id="pagination" class="d-flex justify-content-center"></nav>
+  </div>
+
+  <script src="../js/config.js"></script>
+  <script src="../js/api.js"></script>
+  <script src="../js/nav.js"></script>
+  <script src="../js/detections.js"></script>
+</body>
+</html>

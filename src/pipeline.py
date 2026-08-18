@@ -2,6 +2,8 @@ import os
 import time
 import random
 import json
+import shutil
+from datetime import datetime
 import numpy as np
 from preprocessing import ImagePreprocessor
 from cnn import CNN
@@ -34,6 +36,15 @@ class Pipeline:
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+        # create a dedicated folder for this training run
+        self.run_name = datetime.utcnow().strftime("run_%Y%m%dT%H%M%SZ")
+        self.run_dir = os.path.join(self.checkpoint_dir, self.run_name)
+        os.makedirs(self.run_dir, exist_ok=True)
+
+        # keep track of the previous best file for this run so we can delete it
+        self._prev_best_path: str | None = None
+        self._prev_best_ts: str | None = None
+
         train_root = os.path.join(data_dir, "train")
         self.classes = sorted(
             d for d in os.listdir(train_root) if os.path.isdir(os.path.join(train_root, d))
@@ -63,22 +74,82 @@ class Pipeline:
             self.cnn.load(latest_path)
             self.start_epoch = meta["epoch"] + 1
             self.best_val_acc = meta.get("best_val_acc", 0.0)
+            # If a timestamped best file was recorded in metadata, ensure a
+            # canonical best.npz exists so downstream code (e.g. post-run
+            # reporting) can find it.
+            best_meta_name = meta.get("best_file")
+            best_path = os.path.join(self.checkpoint_dir, "best.npz")
+            if best_meta_name:
+                # candidate may live inside a run folder; prefer absolute path if provided
+                candidate = os.path.join(self.checkpoint_dir, best_meta_name)
+                # if the metadata referred to a file inside a run folder, that path
+                # will start with the run folder name. Try that too.
+                if not os.path.exists(candidate):
+                    candidate = os.path.join(self.checkpoint_dir, meta.get("run", ""), best_meta_name)
+                if os.path.exists(candidate) and not os.path.exists(best_path):
+                    try:
+                        shutil.copy2(candidate, best_path)
+                    except Exception:
+                        pass
+
             print(f"Resumed from checkpoint: epoch {meta['epoch']}, "
                   f"best val accuracy so far {self.best_val_acc:.2%}")
 
     def _save_checkpoint(self, epoch, val_acc):
+        # save a timestamped latest checkpoint and update canonical latest.npz
+        ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        latest_ts_path = os.path.join(self.run_dir, f"latest_{ts}.npz")
+        self.cnn.save(latest_ts_path)
         latest_path = os.path.join(self.checkpoint_dir, "latest.npz")
-        self.cnn.save(latest_path)
+        try:
+            shutil.copy2(latest_ts_path, latest_path)
+        except Exception:
+            # best-effort: if copy fails, still keep the timestamped file
+            pass
 
+        meta = {
+            "epoch": epoch,
+            "val_acc": val_acc,
+            "best_val_acc": self.best_val_acc,
+            "classes": self.classes,
+            "latest_file": os.path.basename(latest_ts_path),
+            "run": self.run_name,
+        }
+        # write run-local meta and a canonical meta at checkpoint root
+        with open(os.path.join(self.run_dir, "latest_meta.json"), "w") as f:
+            json.dump(meta, f)
         with open(os.path.join(self.checkpoint_dir, "latest_meta.json"), "w") as f:
-            json.dump({"epoch": epoch, "val_acc": val_acc,
-                       "best_val_acc": self.best_val_acc, "classes": self.classes}, f)
+            json.dump(meta, f)
 
+        # if this is a new best, save a timestamped best file and update canonical best.npz
         if val_acc > self.best_val_acc:
             self.best_val_acc = val_acc
+            best_ts_path = os.path.join(self.run_dir, f"best_{ts}.npz")
+            self.cnn.save(best_ts_path)
+
+            # delete previous best for this run (if any) to keep run folder tidy
+            try:
+                if self._prev_best_path and os.path.exists(self._prev_best_path):
+                    os.remove(self._prev_best_path)
+            except Exception:
+                pass
+            self._prev_best_path = best_ts_path
+            self._prev_best_ts = ts
+
+            # update canonical best at checkpoint root
             best_path = os.path.join(self.checkpoint_dir, "best.npz")
-            self.cnn.save(best_path)
-            print(f"  -> new best model saved (val accuracy {val_acc:.2%})")
+            try:
+                shutil.copy2(best_ts_path, best_path)
+            except Exception:
+                pass
+
+            meta["best_file"] = os.path.basename(best_ts_path)
+            # update run-local and canonical meta with best file name
+            with open(os.path.join(self.run_dir, "latest_meta.json"), "w") as f:
+                json.dump(meta, f)
+            with open(os.path.join(self.checkpoint_dir, "latest_meta.json"), "w") as f:
+                json.dump(meta, f)
+            print(f"  -> new best model saved (val accuracy {val_acc:.2%}) in run {self.run_name}")
 
     def _load_split(self, split: str) -> list[tuple[np.ndarray, int]]:
         data = []
@@ -103,7 +174,7 @@ class Pipeline:
         val_data = self._load_split("val")
         print(f"Train: {len(train_data)} images, Val: {len(val_data)} images")
 
-        log_path = os.path.join(self.checkpoint_dir, "train_log.csv")
+        log_path = os.path.join(self.run_dir, "train_log.csv")
         log_is_new = not os.path.exists(log_path)
         log_file = open(log_path, "a")
         if log_is_new:
@@ -152,6 +223,37 @@ class Pipeline:
 
         log_file.close()
         print(f"\nTraining finished. Best val accuracy: {self.best_val_acc:.2%}")
+
+        # Ensure there is a timestamped best file even if no new best was
+        # discovered during this run. This creates `best_YYYYMMDDTHHMMSSZ.npz`
+        # from the canonical `best.npz` (if present) and updates metadata.
+        best_path = os.path.join(self.checkpoint_dir, "best.npz")
+        if os.path.exists(best_path):
+            try:
+                ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+                best_ts_path = os.path.join(self.run_dir, f"best_{ts}.npz")
+                shutil.copy2(best_path, best_ts_path)
+                # update both run-local and canonical meta if present
+                meta_path = os.path.join(self.run_dir, "latest_meta.json")
+                try:
+                    if os.path.exists(meta_path):
+                        with open(meta_path) as f:
+                            meta = json.load(f)
+                        meta["best_file"] = os.path.basename(best_ts_path)
+                        with open(meta_path, "w") as f:
+                            json.dump(meta, f)
+                    # also update canonical meta at root
+                    root_meta = os.path.join(self.checkpoint_dir, "latest_meta.json")
+                    if os.path.exists(root_meta):
+                        with open(root_meta) as f:
+                            rmeta = json.load(f)
+                        rmeta["best_file"] = os.path.basename(best_ts_path)
+                        with open(root_meta, "w") as f:
+                            json.dump(rmeta, f)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     def evaluate(self, data: list[tuple[np.ndarray, int]]) -> float:
         correct = 0

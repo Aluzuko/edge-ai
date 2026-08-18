@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cameras - Wildlife detection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+  <div id="nav"></div>
+
+  <div class="container-fluid py-3">
+    <h4 class="mb-3"><i class="bi bi-geo-alt me-2"></i>Cameras</h4>
+
+    <div class="table-responsive mb-4">
+      <table class="table table-hover align-middle">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Camera</th>
+            <th>Location</th>
+            <th>Latitude</th>
+            <th>Longitude</th>
+          </tr>
+        </thead>
+        <tbody id="camerasBody">
+          <tr><td colspan="5" class="text-center text-muted py-4">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div id="imagesSection" style="display:none;">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="mb-0" id="imagesHeading">Images</h5>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="unprocessedOnly">
+          <label class="form-check-label" for="unprocessedOnly">Unprocessed only</label>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr>
+              <th></th>
+              <th>File</th>
+              <th>Captured at</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="imagesBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p id="noCameraSelected" class="text-muted">Select a camera above to view its images.</p>
+  </div>
+
+  <script src="../js/config.js"></script>
+  <script src="../js/api.js"></script>
+  <script src="../js/nav.js"></script>
+  <script src="../js/cameras.js"></script>
+</body>
+</html>
