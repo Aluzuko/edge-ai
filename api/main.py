@@ -1,4 +1,5 @@
 import json
+import secrets
 import sys
 import time
 from datetime import datetime
@@ -11,9 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pyodbc import IntegrityError
 
-from config import IMAGES_DIR
+from config import IMAGES_DIR, MODELS_DIR
 from database import DictConnection, get_db
 from schemas import DeviceRegister, RequestCreate
+import notifications
 from pydantic import BaseModel
 
 
@@ -38,8 +40,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from cnn import CNN
 from preprocessing import ImagePreprocessor
 
-MODEL_PATH = "models/best2.npz"
-MODEL_META_PATH = "models/latest_meta.json"
+OTP_LENGTH = 6
+
+
+def _generate_otp():
+    return f"{secrets.randbelow(10 ** OTP_LENGTH):0{OTP_LENGTH}d}"
+
+
+def _clean_ranger(row):
+    r = dict(row)
+    if r.get("otp") is not None:
+        r["otp"] = str(r["otp"]).strip()
+    return r
+
+
+MODEL_PATH = f"{MODELS_DIR}/best.npz"
+MODEL_META_PATH = f"{MODELS_DIR}/latest_meta.json"
 
 with open(MODEL_META_PATH) as _f:
     _meta = json.load(_f)
@@ -50,7 +66,7 @@ MODEL_ACCURACY = _meta.get("best_val_acc", _meta.get("val_acc"))
 
 _cnn = CNN(num_classes=len(MODEL_CLASSES))
 _cnn.load(MODEL_PATH)
-_preprocessor = ImagePreprocessor(target_size=(64, 64))
+_preprocessor = ImagePreprocessor(target_size=(96, 96))
 
 _model_run_id_cache: int | None = None
 
@@ -112,12 +128,12 @@ def list_cameras(db: DictConnection = Depends(get_db)):
 @app.get("/rangers")
 def list_rangers(db: DictConnection = Depends(get_db)):
     rows = db.execute("SELECT * FROM rangers ORDER BY name").fetchall()
-    return [dict(r) for r in rows]
+    return [_clean_ranger(r) for r in rows]
 
 
 @app.post("/rangers", status_code=201)
 def create_ranger(payload: RangerCreate, db: DictConnection = Depends(get_db)):
-    otp = str(uuid4().int)[:6]
+    otp = _generate_otp()
     row = db.execute(
         """
         INSERT INTO rangers (name, contact, otp)
@@ -127,7 +143,25 @@ def create_ranger(payload: RangerCreate, db: DictConnection = Depends(get_db)):
         (payload.name, payload.contact, otp),
     ).fetchone()
     db.commit()
-    return dict(row)
+    return _clean_ranger(row)
+
+
+@app.post("/rangers/{ranger_id}/otp")
+def regenerate_otp(ranger_id: int, db: DictConnection = Depends(get_db)):
+    otp = _generate_otp()
+    row = db.execute(
+        """
+        UPDATE rangers
+        SET otp = ?
+        OUTPUT INSERTED.*
+        WHERE ranger_id = ?
+        """,
+        (otp, ranger_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Ranger not found")
+    db.commit()
+    return _clean_ranger(row)
 
 @app.post("/requests", status_code=201)
 def create_request(payload: RequestCreate, db: DictConnection = Depends(get_db)):
@@ -302,7 +336,6 @@ def list_images(
 
 @app.get("/images/{image_id}/file")
 def get_image_file(image_id: int, db: DictConnection = Depends(get_db)):
-
     row = db.execute(
         "SELECT file_path FROM images WHERE image_id = ?", (image_id,)
     ).fetchone()
@@ -378,6 +411,8 @@ def detect_image(image_id: int, db: DictConnection = Depends(get_db)):
     )
     db.commit()
 
+    notify_summary = notifications.notify_for_detection(db, new_id)
+
     detection_row = db.execute(
         """
         SELECT det.*, s.name AS species_name
@@ -387,7 +422,45 @@ def detect_image(image_id: int, db: DictConnection = Depends(get_db)):
         """,
         (new_id,),
     ).fetchone()
-    return dict(detection_row)
+    result = dict(detection_row)
+    result["notifications"] = notify_summary
+    return result
+
+
+@app.post("/detections/{detection_id}/notify")
+def notify_detection(
+    detection_id: int,
+    min_confidence: float | None = Query(default=None, ge=0.0, le=1.0),
+    db: DictConnection = Depends(get_db),
+):
+    row = db.execute(
+        "SELECT detection_id FROM detections WHERE detection_id = ?", (detection_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    return notifications.notify_for_detection(
+        db, detection_id, min_confidence=min_confidence
+    )
+
+
+@app.get("/fcm-status")
+def fcm_status():
+    return notifications.status()
+
+
+@app.get("/notifications")
+def list_notifications(db: DictConnection = Depends(get_db)):
+    rows = db.execute(
+        """
+        SELECT n.*, r.ranger_id, rg.name AS ranger_name, s.name AS species_name
+        FROM notifications n
+        JOIN requests r  ON r.request_id = n.request_id
+        JOIN rangers  rg ON rg.ranger_id = r.ranger_id
+        JOIN species  s  ON s.species_id = r.species_id
+        ORDER BY n.sent_at DESC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 @app.get("/model-runs")
@@ -461,20 +534,45 @@ def register_device(payload: DeviceRegister, db: DictConnection = Depends(get_db
 
 @app.post("/device-info")
 def receive_device_info(payload: dict, db: DictConnection = Depends(get_db)):
-    fcm_token = payload.get("fcm_token")
-    platform = payload.get("platform")
-    platform_version = payload.get("platformVersion")
+    fcm_token = payload.get("fcm_token") or payload.get("fcmToken")
     username = payload.get("username")
+    raw_platform = (payload.get("platform") or "").lower()
 
     if not fcm_token:
-        raise HTTPException(status_code=400, detail="Missing fcm_token in payload")
+        raise HTTPException(status_code=400, detail="Missing fcm_token/fcmToken in payload")
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username in payload")
 
-    db.execute(
-        """insert into devices(
-        select ranger_id from rangers where name = ?), ?, ?, ?, GETDATE()
-        """,
-        (username, fcm_token, platform, platform_version)
-    )
-    db.commit()
+    platform = raw_platform if raw_platform in ("ios", "android", "web") else "web"
+
+    ranger_row = db.execute(
+        "SELECT ranger_id FROM rangers WHERE name = ?", (username,)
+    ).fetchone()
+    if ranger_row is None:
+        raise HTTPException(status_code=404, detail=f"No ranger named '{username}'")
+    ranger_id = ranger_row["ranger_id"]
+
+    try:
+        db.execute(
+            """
+            MERGE devices AS target
+            USING (SELECT ? AS fcm_token) AS source
+            ON target.fcm_token = source.fcm_token
+            WHEN MATCHED THEN
+                UPDATE SET ranger_id = ?, platform = ?, last_active_at = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (ranger_id, fcm_token, platform, registered_at, last_active_at)
+                VALUES (?, ?, ?, GETDATE(), GETDATE());
+            """,
+            (fcm_token, ranger_id, platform, ranger_id, fcm_token, platform),
+        )
+        db.commit()
+    except IntegrityError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid reference: {e}")
+
+    row = db.execute(
+        "SELECT * FROM devices WHERE fcm_token = ?", (fcm_token,)
+    ).fetchone()
+    return dict(row)
 
     return {"status": "ok", "message": "Device info received"}

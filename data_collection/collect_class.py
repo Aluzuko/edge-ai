@@ -59,6 +59,22 @@ def collect_candidates(metadata, wanted_categories):
     return list(best_per_sequence.values())
 
 
+def load_manifest(manifest_path):
+    if not os.path.exists(manifest_path):
+        return {}
+    with open(manifest_path) as f:
+        records = json.load(f)
+    # keyed by (class, file_name) so repeated runs (different classes,
+    # different seasons, or re-runs) merge instead of clobbering each other
+    return {(r["class"], r["file_name"]): r for r in records}
+
+
+def save_manifest(manifest_path, manifest_by_key):
+    records = list(manifest_by_key.values())
+    with open(manifest_path, "w") as f:
+        json.dump(records, f, indent=2)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--class", dest="class_name", required=True, choices=CLASS_TO_CATEGORIES.keys())
@@ -73,6 +89,9 @@ def main():
     class_dir = os.path.join(args.out_dir, args.class_name)
     os.makedirs(class_dir, exist_ok=True)
 
+    manifest_path = os.path.join(args.out_dir, "manifest.json")
+    manifest = load_manifest(manifest_path)
+
     already_have = set(os.listdir(class_dir))
     print(f"Already have {len(already_have)} images for class '{args.class_name}'")
 
@@ -86,6 +105,13 @@ def main():
         all_candidates.extend(candidates)
 
     random.shuffle(all_candidates)
+
+    # safe_name -> img, so we can backfill manifest entries for files that
+    # are already on disk from a previous run (not just ones downloaded now),
+    # as long as they show up among this run's candidates.
+    candidate_by_safe_name = {
+        img["file_name"].replace("/", "_"): img for img in all_candidates
+    }
 
     still_needed = args.target - len(already_have)
     if still_needed <= 0:
@@ -115,6 +141,36 @@ def main():
     if total_now < args.target:
         print(f"Still short of target ({args.target}). Add another --season and re-run "
               f"(already-downloaded files are skipped automatically).")
+
+    # Merge location/seq_id into the shared manifest for every file now on
+    # disk for this class that we have metadata for in this run (covers both
+    # newly-downloaded files and pre-existing ones from earlier runs/seasons).
+    backfilled = 0
+    for safe_name in os.listdir(class_dir):
+        img = candidate_by_safe_name.get(safe_name)
+        if img is None:
+            continue
+        key = (args.class_name, safe_name)
+        if key not in manifest:
+            backfilled += 1
+        manifest[key] = {
+            "class": args.class_name,
+            "file_name": safe_name,
+            "location": img.get("location"),
+            "seq_id": img.get("seq_id"),
+        }
+
+    save_manifest(manifest_path, manifest)
+    print(f"Manifest updated: {backfilled} new entries, {len(manifest)} total in {manifest_path}")
+
+    no_metadata = [
+        f for f in os.listdir(class_dir)
+        if f not in candidate_by_safe_name and (args.class_name, f) not in manifest
+    ]
+    if no_metadata:
+        print(f"Note: {len(no_metadata)} file(s) in {class_dir} have no location "
+              f"metadata from this run's seasons (e.g. downloaded under a season "
+              f"not passed via --season this time) and were left out of the manifest update.")
 
 
 if __name__ == "__main__":

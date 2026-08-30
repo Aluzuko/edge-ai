@@ -16,19 +16,23 @@ if __name__ == "__main__":
     pipeline = Pipeline(
         data_dir=DATA_DIR,
         checkpoint_dir=CHECKPOINT_DIR,
-        epochs=200,
+        epochs=400,
         lr=0.001,
         batch_size=16,
         max_hours=8.0,
+        dropout_rate=0.3,
+        weight_decay=1e-4,
+        num_filters=8,
+        num_filters2=16,
     )
 
     print("\nTraining\n")
     pipeline.train()
 
-    best_path = os.path.join(CHECKPOINT_DIR, "best.npz")
+    best_path = os.path.join(pipeline.run_dir, "best.npz")
     if os.path.exists(best_path):
         pipeline.cnn.load(best_path)
-        dummy_input = np.zeros((64, 64, 3), dtype=np.float32)
+        dummy_input = np.zeros((96, 96, 3), dtype=np.float32)
         runs = 20
         start = time.perf_counter()
         for _ in range(runs):
@@ -51,7 +55,7 @@ if __name__ == "__main__":
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        log_path = os.path.join(CHECKPOINT_DIR, "model_run_post.log")
+        log_path = os.path.join(pipeline.run_dir, "model_run_post.log")
         try:
             with urllib.request.urlopen(req) as resp:
                 status = resp.getcode()

@@ -1,6 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer';
-import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:http/http.dart' as http;
 
@@ -10,8 +11,10 @@ class AuthService {
     defaultValue: 'http://localhost:8000',
   );
 
+  static const String vapidKey = String.fromEnvironment('FCM_VAPID_KEY');
+
   static Future<bool> authenticate(String username, String otp) async {
-    final uri = Uri.parse('$baseUrl/authenticate');
+    final uri = Uri.parse('$baseUrl/api/authenticate');
     try {
       print('AuthService.authenticate request: $username, $otp, $uri');
       final resp = await http
@@ -31,7 +34,7 @@ class AuthService {
         final body = jsonDecode(resp.body);
         final authenticated = body is Map && body['authenticated'] == true;
         if (authenticated) {
-          await _registerDeviceForNotifications(username);
+          unawaited(_registerDeviceForNotifications(username));
           return true;
         }
       }
@@ -41,44 +44,85 @@ class AuthService {
     }
   }
 
+  static String _platformName() {
+    if (kIsWeb) return 'web';
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return 'android';
+      case TargetPlatform.iOS:
+        return 'ios';
+      default:
+        return 'web';
+    }
+  }
+
   static Future<void> _registerDeviceForNotifications(String username) async {
     final payload = <String, dynamic>{
       'username': username,
-      'platform': Platform.operatingSystem,
-      'platformVersion': Platform.operatingSystemVersion,
+      'platform': _platformName(),
       'appName': 'lwaziapp',
     };
 
     try {
       final messaging = FirebaseMessaging.instance;
-      final settings = await messaging.requestPermission(
-        alert: true,
-        badge: true,
-        sound: true,
-        provisional: false,
-        carPlay: false,
-        criticalAlert: false,
-        announcement: false,
-      );
+      final settings = await messaging
+          .requestPermission(
+            alert: true,
+            badge: true,
+            sound: true,
+            provisional: false,
+            carPlay: false,
+            criticalAlert: false,
+            announcement: false,
+          )
+          .timeout(const Duration(seconds: 20));
 
       if (settings.authorizationStatus == AuthorizationStatus.authorized ||
           settings.authorizationStatus == AuthorizationStatus.provisional) {
-        payload['fcmToken'] = await messaging.getToken();
+        if (kIsWeb && vapidKey.isEmpty) {
+          log(
+            'FCM: web needs a VAPID key. Pass it with '
+            '--dart-define=FCM_VAPID_KEY=<key from Firebase Console -> '
+            'Project settings -> Cloud Messaging -> Web Push certificates>',
+          );
+          payload['fcm_token'] = null;
+        } else {
+          payload['fcm_token'] = await messaging
+              .getToken(vapidKey: kIsWeb ? vapidKey : null)
+              .timeout(const Duration(seconds: 20));
+          log('FCM token: ${payload['fcm_token']}');
+        }
+      } else {
+        log('FCM: permission not granted (${settings.authorizationStatus})');
       }
-    } catch (_) {
-      payload['fcmToken'] = null;
+    } on TimeoutException {
+      log(
+        'FCM: timed out. On web this usually means the notification '
+        'permission prompt was never answered, or '
+        'web/firebase-messaging-sw.js is missing.',
+      );
+      payload['fcm_token'] = null;
+    } catch (e, st) {
+      log('FCM: getToken failed: $e', stackTrace: st);
+      payload['fcm_token'] = null;
+    }
+
+    if (payload['fcm_token'] == null) {
+      log('FCM: no token, skipping device registration');
+      return;
     }
 
     try {
-      await http
+      final resp = await http
           .post(
             Uri.parse('$baseUrl/device-info'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode(payload),
           )
           .timeout(const Duration(seconds: 8));
-    } catch (_) {
-      // Ignore registration failures so the user can still continue to the app.
+      log('device-info response: ${resp.statusCode} ${resp.body}');
+    } catch (e) {
+      log('device-info failed: $e');
     }
   }
 }
