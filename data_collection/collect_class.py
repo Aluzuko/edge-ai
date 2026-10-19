@@ -64,8 +64,6 @@ def load_manifest(manifest_path):
         return {}
     with open(manifest_path) as f:
         records = json.load(f)
-    # keyed by (class, file_name) so repeated runs (different classes,
-    # different seasons, or re-runs) merge instead of clobbering each other
     return {(r["class"], r["file_name"]): r for r in records}
 
 
@@ -106,9 +104,6 @@ def main():
 
     random.shuffle(all_candidates)
 
-    # safe_name -> img, so we can backfill manifest entries for files that
-    # are already on disk from a previous run (not just ones downloaded now),
-    # as long as they show up among this run's candidates.
     candidate_by_safe_name = {
         img["file_name"].replace("/", "_"): img for img in all_candidates
     }
@@ -142,9 +137,6 @@ def main():
         print(f"Still short of target ({args.target}). Add another --season and re-run "
               f"(already-downloaded files are skipped automatically).")
 
-    # Merge location/seq_id into the shared manifest for every file now on
-    # disk for this class that we have metadata for in this run (covers both
-    # newly-downloaded files and pre-existing ones from earlier runs/seasons).
     backfilled = 0
     for safe_name in os.listdir(class_dir):
         img = candidate_by_safe_name.get(safe_name)

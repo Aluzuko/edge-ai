@@ -35,7 +35,8 @@ CREATE TABLE cameras (
 CREATE TABLE rangers (
     ranger_id   INT IDENTITY(1,1) PRIMARY KEY,
     name        NVARCHAR(100) NOT NULL,
-    contact     NVARCHAR(255)
+    contact     NVARCHAR(255),
+    otp         NVARCHAR(10)
 );
 
 CREATE TABLE devices (
@@ -45,6 +46,7 @@ CREATE TABLE devices (
     platform        NVARCHAR(10) NOT NULL CHECK (platform IN ('ios', 'android', 'web')),
     registered_at   DATETIME NOT NULL DEFAULT GETDATE(),
     last_active_at  DATETIME NULL,
+    platform_version varchar(100),
     CONSTRAINT FK_devices_ranger FOREIGN KEY (ranger_id) REFERENCES rangers(ranger_id)
 );
 
@@ -115,27 +117,4 @@ CREATE TABLE notifications (
 CREATE INDEX idx_notifications_request ON notifications(request_id);
 GO
 
-INSERT INTO species (name, common_name) VALUES
-    ('elephant', 'African Elephant'),
-    ('zebra', 'Plains Zebra'),
-    ('lion', 'Lion'),
-    ('wildebeest', 'Blue Wildebeest'),
-    ('empty', 'No animal present');
-
-INSERT INTO cameras (name, location_description, latitude, longitude) VALUES
-    ('CAM-01', 'North waterhole', -2.3333, 34.8333),
-    ('CAM-02', 'Riverbank crossing', -2.3500, 34.8500),
-    ('CAM-03', 'Open plain, east grid', -2.3100, 34.8600);
-
-INSERT INTO rangers (name, contact) VALUES
-    ('T. Nkosi', 't.nkosi@example.org'),
-    ('S. van Wyk', 's.vanwyk@example.org');
-
-INSERT INTO devices (ranger_id, fcm_token, platform) VALUES
-    (1, 'demo-fcm-token-nkosi-android', 'android'),
-    (2, 'demo-fcm-token-vanwyk-ios', 'ios');
-
-INSERT INTO model_runs (model_version, quantized, size_kb, avg_latency_ms, accuracy) VALUES
-    ('cnn_v1_fp32', 0, 4200.0, 180.0, 0.87),
-    ('cnn_v1_int8', 1, 1100.0, 65.0, 0.84);
 GO

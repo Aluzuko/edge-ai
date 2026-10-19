@@ -33,8 +33,12 @@
     <div id="uploadedSection" class="mt-4" style="display:none;">
       <h5>Uploaded</h5>
       <img id="uploadedImg" class="img-fluid img-thumbnail mb-3" style="max-height: 300px;">
-      <div>
-        <button id="detectBtn" class="btn btn-outline-primary">
+      <div class="d-flex gap-2 align-items-center">
+        <select id="modelSelect" class="form-select" style="max-width: 260px;">
+          <option value="/detect" selected>Lwazi</option>
+          <option value="/detect-tf">TensorFlow</option>
+        </select>
+        <button id="detectBtn" class="btn btn-outline-primary text-nowrap">
           <i class="bi bi-cpu me-1"></i><span id="detectBtnText">Detect now</span>
         </button>
       </div>

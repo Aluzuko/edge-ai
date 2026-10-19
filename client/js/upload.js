@@ -8,6 +8,7 @@
   const errorAlert = document.getElementById('errorAlert');
   const uploadedSection = document.getElementById('uploadedSection');
   const uploadedImg = document.getElementById('uploadedImg');
+  const modelSelect = document.getElementById('modelSelect');
   const detectBtn = document.getElementById('detectBtn');
   const detectBtnText = document.getElementById('detectBtnText');
   const detectionResult = document.getElementById('detectionResult');
@@ -73,17 +74,23 @@
 
   detectBtn.addEventListener('click', () => {
     if (!uploadedImage) return;
+    const endpoint = modelSelect.value;
+    const modelName = modelSelect.options[modelSelect.selectedIndex].text;
     detectBtn.disabled = true;
+    modelSelect.disabled = true;
     detectBtnText.textContent = 'Running detection...';
+    hideError();
 
-    Api.post(`/images/${uploadedImage.image_id}/detect`, {}).then(d => {
-      detectionResult.innerHTML = `<i class="bi bi-check-circle me-1"></i>Predicted <strong>${Fmt.escapeHtml(d.species_name)}</strong> with ${Fmt.percent(d.confidence)} confidence`;
+    Api.post(`/images/${uploadedImage.image_id}${endpoint}`, {}).then(d => {
+      detectionResult.innerHTML = `<i class="bi bi-check-circle me-1"></i>Predicted <strong>${Fmt.escapeHtml(d.species_name)}</strong> with ${Fmt.percent(d.confidence)} confidence<br><small class="text-muted">${Fmt.escapeHtml(modelName)} · ${Number(d.inference_time_ms).toFixed(1)} ms</small>`;
       detectionResult.style.display = 'block';
       detectBtn.disabled = false;
+      modelSelect.disabled = false;
       detectBtnText.textContent = 'Detect now';
     }).catch(err => {
       showError(err.message || 'Detection failed');
       detectBtn.disabled = false;
+      modelSelect.disabled = false;
       detectBtnText.textContent = 'Detect now';
     });
   });

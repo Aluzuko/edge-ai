@@ -1,3 +1,4 @@
+import io
 import json
 import secrets
 import sys
@@ -39,6 +40,9 @@ class ModelRunCreate(BaseModel):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from cnn import CNN
 from preprocessing import ImagePreprocessor
+from pipeline_lib import load_image as tf_load_image
+from PIL import UnidentifiedImageError
+from tensorflow import keras
 
 OTP_LENGTH = 6
 
@@ -66,9 +70,57 @@ MODEL_ACCURACY = _meta.get("best_val_acc", _meta.get("val_acc"))
 
 _cnn = CNN(num_classes=len(MODEL_CLASSES))
 _cnn.load(MODEL_PATH)
-_preprocessor = ImagePreprocessor(target_size=(96, 96))
-
+_preprocessor = ImagePreprocessor(target_size=(64, 64))  
 _model_run_id_cache: int | None = None
+
+TF_MODEL_PATH = Path(__file__).resolve().parent.parent / "src" / "wildlife_cnn.keras"
+TF_MODEL_VERSION = "keras_cnn_v1_fp32"
+TF_MODEL_ACCURACY = None
+
+_tf_model = keras.models.load_model(TF_MODEL_PATH)
+if _tf_model.output_shape[-1] != len(MODEL_CLASSES):
+    raise RuntimeError(
+        f"Keras model has {_tf_model.output_shape[-1]} outputs but {len(MODEL_CLASSES)} classes are configured: {MODEL_CLASSES}"
+    )
+_tf_input_shape = tuple(_tf_model.input_shape[1:])
+_tf_model(np.zeros((1, *_tf_input_shape), dtype=np.float32), training=False)
+_tf_model_run_id_cache: int | None = None
+
+
+def _tf_predict(image_array):
+    start = time.perf_counter()
+    probs = _tf_model(np.expand_dims(image_array, axis=0), training=False).numpy()[0]
+    inference_time_ms = (time.perf_counter() - start) * 1000
+    return probs, inference_time_ms
+
+
+def _get_or_create_tf_model_run(db: DictConnection) -> int:
+    row = db.execute(
+        "SELECT model_run_id FROM model_runs WHERE model_version = ?",
+        (TF_MODEL_VERSION,),
+    ).fetchone()
+    if row is not None:
+        return row["model_run_id"]
+
+    dummy = np.zeros(_tf_input_shape, dtype=np.float32)
+    n_runs = 20
+    start = time.perf_counter()
+    for _ in range(n_runs):
+        _tf_predict(dummy)
+    avg_latency_ms = (time.perf_counter() - start) / n_runs * 1000
+
+    size_kb = TF_MODEL_PATH.stat().st_size / 1024
+
+    row = db.execute(
+        """
+        INSERT INTO model_runs (model_version, quantized, size_kb, avg_latency_ms, accuracy)
+        OUTPUT INSERTED.model_run_id
+        VALUES (?, 0, ?, ?, ?)
+        """,
+        (TF_MODEL_VERSION, size_kb, avg_latency_ms, TF_MODEL_ACCURACY),
+    ).fetchone()
+    db.commit()
+    return row["model_run_id"]
 
 
 def _get_or_create_model_run(db: DictConnection) -> int:
@@ -425,6 +477,103 @@ def detect_image(image_id: int, db: DictConnection = Depends(get_db)):
     result = dict(detection_row)
     result["notifications"] = notify_summary
     return result
+
+
+@app.post("/images/{image_id}/detect-tf", status_code=201)
+def detect_image_tf(image_id: int, db: DictConnection = Depends(get_db)):
+    row = db.execute(
+        "SELECT file_path FROM images WHERE image_id = ?", (image_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Image record not found")
+
+    full_path = IMAGES_DIR / row["file_path"]
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="Image file missing on disk")
+
+    image_array = tf_load_image(str(full_path))
+    probs, inference_time_ms = _tf_predict(image_array)
+
+    pred_idx = int(np.argmax(probs))
+    predicted_class = MODEL_CLASSES[pred_idx]
+    confidence = float(probs[pred_idx])
+
+    species_row = db.execute(
+        "SELECT species_id FROM species WHERE name = ?", (predicted_class,)
+    ).fetchone()
+    if species_row is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model predicted class '{predicted_class}' which has no matching species row",
+        )
+
+    global _tf_model_run_id_cache
+    if _tf_model_run_id_cache is None:
+        _tf_model_run_id_cache = _get_or_create_tf_model_run(db)
+    model_run_id = _tf_model_run_id_cache
+
+    cur = db.execute(
+        """
+        INSERT INTO detections (image_id, species_id, model_run_id, confidence, inference_time_ms, created_at)
+        OUTPUT INSERTED.detection_id
+        VALUES (?, ?, ?, ?, ?, GETDATE())
+        """,
+        (image_id, species_row["species_id"], model_run_id, confidence, inference_time_ms),
+    )
+    new_id = cur.fetchone()["detection_id"]
+    db.commit()
+    db.execute(
+        """
+        UPDATE requests
+        SET fulfilled_detection_id = ?, fulfilled_at = GETDATE()
+        WHERE species_id = ?
+          AND status = 'pending'
+          AND fulfilled_detection_id IS NULL
+          AND (camera_id IS NULL OR camera_id = (
+              SELECT camera_id FROM images WHERE image_id = ?
+          ))
+        """,
+        (new_id, species_row["species_id"], image_id),
+    )
+    db.commit()
+
+    notify_summary = notifications.notify_for_detection(db, new_id)
+
+    detection_row = db.execute(
+        """
+        SELECT det.*, s.name AS species_name
+        FROM detections det
+        JOIN species s ON s.species_id = det.species_id
+        WHERE det.detection_id = ?
+        """,
+        (new_id,),
+    ).fetchone()
+    result = dict(detection_row)
+    result["probabilities"] = {c: float(p) for c, p in zip(MODEL_CLASSES, probs)}
+    result["notifications"] = notify_summary
+    return result
+
+
+@app.post("/tf/predict")
+def predict_tf(file: UploadFile = File(...)):
+    contents = file.file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        image_array = tf_load_image(io.BytesIO(contents))
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="File is not a readable image")
+
+    probs, inference_time_ms = _tf_predict(image_array)
+    pred_idx = int(np.argmax(probs))
+    return {
+        "filename": file.filename,
+        "predicted_class": MODEL_CLASSES[pred_idx],
+        "confidence": float(probs[pred_idx]),
+        "probabilities": {c: float(p) for c, p in zip(MODEL_CLASSES, probs)},
+        "inference_time_ms": round(inference_time_ms, 2),
+        "model_version": TF_MODEL_VERSION,
+    }
 
 
 @app.post("/detections/{detection_id}/notify")

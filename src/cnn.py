@@ -3,7 +3,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 
 class CNN:
-   
+
     def __init__(self, num_classes: int, num_filters: int = 8, kernel_size: int = 3,
                  hidden_dim: int = 32, seed: int = 42, dropout_rate: float = 0.3,
                  num_filters2: int | None = None):
@@ -61,12 +61,10 @@ class CNN:
 
     @staticmethod
     def _conv_backward_generic(d_out, windows, filters, input_shape):
-       
         d_filters = np.tensordot(d_out, windows, axes=([0, 1], [0, 1]))
         d_bias = d_out.sum(axis=(0, 1))
 
         kh, kw = filters.shape[1], filters.shape[2]
-        # (H_out, W_out, kh, kw, C_in)
         d_windows = np.tensordot(d_out, filters, axes=([2], [0]))
         d_input = np.zeros(input_shape, dtype=np.float32)
         H_out, W_out = d_out.shape[0], d_out.shape[1]
@@ -116,8 +114,6 @@ class CNN:
         hidden_z = flat @ self.dense1_w + self.dense1_b
         hidden_a = self._relu(hidden_z)
 
-        # Inverted dropout: only active during training, and rescaled so
-        # eval-time forward passes (training=False) need no adjustment.
         if training and self.dropout_rate > 0:
             keep_prob = 1.0 - self.dropout_rate
             dropout_mask = (
@@ -148,14 +144,13 @@ class CNN:
         d_dense2_w = np.outer(cache['hidden_a'], d_out_z).astype(np.float32)
         d_dense2_b = d_out_z.astype(np.float32)
         d_hidden_a = self.dense2_w @ d_out_z
-        d_hidden_a = d_hidden_a * cache['dropout_mask']  # backprop through dropout
+        d_hidden_a = d_hidden_a * cache['dropout_mask']
 
         d_hidden_z = d_hidden_a * (cache['hidden_z'] > 0)
         d_dense1_w = np.outer(cache['flat'], d_hidden_z).astype(np.float32)
         d_dense1_b = d_hidden_z.astype(np.float32)
         d_flat = d_hidden_z @ self.dense1_w.T
 
-        # --- block 2 ---
         d_pool2_out = d_flat.reshape(cache['pool2_out_shape'])
         d_relu2 = self._maxpool_backward(d_pool2_out, cache['pool2_mask'], cache['pre_pool2_shape'])
         d_conv2_out = d_relu2 * (cache['conv2_out'] > 0)
@@ -163,7 +158,6 @@ class CNN:
             d_conv2_out, cache['windows2'], self.filters2, cache['pool_out'].shape
         )
 
-        # --- block 1 ---
         d_relu = self._maxpool_backward(d_pool_out, cache['pool_mask'], cache['pre_pool_shape'])
         d_conv_out = d_relu * (cache['conv_out'] > 0)
         d_filters = np.tensordot(d_conv_out, cache['windows'], axes=([0, 1], [0, 1]))
@@ -177,7 +171,6 @@ class CNN:
         )
 
     def apply_gradients(self, grads: dict, lr: float, weight_decay: float = 0.0):
-        # L2 weight decay on weight tensors only (not biases).
         self.filters -= lr * (grads['filters'] + weight_decay * self.filters)
         self.conv_bias -= lr * grads['conv_bias']
         self.filters2 -= lr * (grads['filters2'] + weight_decay * self.filters2)
@@ -186,10 +179,6 @@ class CNN:
         self.dense1_b -= lr * grads['dense1_b']
         self.dense2_w -= lr * (grads['dense2_w'] + weight_decay * self.dense2_w)
         self.dense2_b -= lr * grads['dense2_b']
-
-    def backward(self, cache, actual_idx: int, lr=0.001, weight_decay: float = 0.0):
-        grads = self.gradients(cache, actual_idx)
-        self.apply_gradients(grads, lr, weight_decay=weight_decay)
 
     def save(self, path: str):
         np.savez(path,
@@ -201,12 +190,6 @@ class CNN:
 
     def load(self, path: str):
         data = np.load(path)
-        if 'filters2' not in data:
-            raise ValueError(
-                f"{path} is a single-conv-block checkpoint from the older CNN. "
-                "The architecture now has two conv blocks, so old checkpoints "
-                "can't be loaded -- retrain and use the new best.npz."
-            )
         self.filters = data['filters']
         self.conv_bias = data['conv_bias']
         self.filters2 = data['filters2']
